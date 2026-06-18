@@ -1,54 +1,75 @@
+<div align="center">
+
 # SwiftAgentSDK
 
-A Swift port of Python's [pydantic-ai](https://github.com/pydantic/pydantic-ai) — a
-typed, model-agnostic LLM **agent framework**. macOS 26+, Swift 6.
+### Typed, model-agnostic LLM agents in pure Swift.
 
-Instead of reinventing Pydantic's runtime schema magic, the structured-output and
-tool-schema substrate is Apple's **FoundationModels** (`@Generable` /
-`GenerationSchema` / `GeneratedContent`) — used to drive *both* the on-device
-Apple model *and* remote providers.
+A faithful Swift port of Python's [pydantic-ai](https://github.com/pydantic/pydantic-ai) — agents, tools, structured output, streaming, and a graph-based run engine — for Apple platforms, built on **FoundationModels**.
 
-## Status — Phase 1 (vertical slice, complete)
+[![Swift 6.2](https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white)](https://swift.org)
+[![Platform](https://img.shields.io/badge/Platform-macOS%2026%2B-000000?logo=apple&logoColor=white)](#)
+[![SwiftPM](https://img.shields.io/badge/SwiftPM-compatible-brightgreen)](#installation)
+[![Tests](https://img.shields.io/badge/tests-75%20passing-2ea44f)](#build--test)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-| Area | Status |
-|------|--------|
-| `Agent<Deps, Output>`, `RunContext`, run loop | ✅ |
-| Tools (closure + protocol), parallel execution, type erasure | ✅ |
-| Output modes: text, forced-output-tool, native, prompted | ✅ |
-| Retries + `ModelRetry` self-correction (tool & output validator) | ✅ |
-| Usage limits, message history, streaming (`runStream`) | ✅ |
-| Schema bridge: `GenerationSchema ⇆ JSONValue ⇆ GeneratedContent` | ✅ |
-| Providers: **Apple on-device**, **Anthropic** | ✅ |
-| `TestModel` / `FunctionModel` / `FallbackModel` | ✅ |
+Anthropic Claude · OpenAI · Google Gemini · Apple on-device — one API.
 
-36 tests pass offline (live on-device / network tests are opt-in and auto-skip).
+</div>
 
-### Phase 2 (in progress)
+---
 
-| Area | Status |
-|------|--------|
-| **OpenAI** provider (Chat Completions; gateway to OpenAI-compatible endpoints) | ✅ |
-| **Google Gemini** provider (`generateContent`) | ✅ |
-| Native structured output + per-provider schema normalization (OpenAI strict mode, Gemini OpenAPI subset) | ✅ |
-| Multimodal parts, reasoning parts, parallel tool calls, typed streamed partials | ⏳ |
-
-**Phase 1 limitations:** Apple provider is single-turn, text + native structured
-output only (on-device tool calling deferred). Streaming surfaces text deltas +
-final output; typed partials deferred. See `Plan` for Phases 2–4 (OpenAI, Gemini,
-graph engine, MCP, evals, observability).
-
-## Quick start
+**SwiftAgentSDK** lets you build AI agents — LLM calls plus typed tools, structured output, and a self-correcting run loop — through one provider-agnostic API. Rather than reimplementing Pydantic's runtime schema engine, it reuses Apple's **FoundationModels** (`@Generable` / `GenerationSchema` / `GeneratedContent`) as the schema substrate to drive both the on-device Apple model and remote providers.
 
 ```swift
 import AgentKit
 
-// Plain text
 let agent = Agent<Void, String>(
     AnthropicModel(model: "claude-sonnet-4-6"),
     instructions: "Be concise.")
+
 let result = try await agent.run("Where does \"hello world\" come from?")
 print(result.output)
 ```
+
+## Why SwiftAgentSDK
+
+- **Typed end-to-end.** `Agent<Deps, Output>` is generic over your dependencies and a `@Generable` output type — no stringly-typed JSON wrangling.
+- **Model-agnostic.** Swap Claude, GPT, Gemini, or the Apple on-device model behind one `ModelProtocol`. `"provider:model"` selectors included.
+- **Tools with dependency injection.** Register closures or types; they run in parallel and receive a `RunContext` carrying your `deps`.
+- **Structured output, four ways.** Plain text, forced output-tool, provider-native JSON schema, or prompted — selected automatically per model.
+- **Self-correcting.** Tools and validators throw `ModelRetry`; the loop re-prompts within a bounded budget.
+- **Streaming.** Text and reasoning deltas, plus typed partial snapshots of the structured output as it is generated.
+- **Graph run engine.** The loop is a real state machine you can observe and step through node-by-node via `iter()`.
+- **Testable offline.** `TestModel`, `FunctionModel`, `ScriptedStreamModel`, and `FallbackModel` let the full suite run with no network and no device.
+
+## Providers
+
+| Provider | Model API | Structured output | Streaming | Multimodal |
+|---|---|---|---|---|
+| Anthropic Claude | Messages API | output-tool | SSE | image, document |
+| OpenAI | Chat Completions | native (strict JSON schema) | SSE | image, audio, file |
+| Google Gemini | `generateContent` | native (OpenAPI subset) | SSE | inline, file data |
+| Apple on-device | FoundationModels | native | text deltas | text only |
+
+## Installation
+
+Add the package to your `Package.swift`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/f3xp/swift-agent-sdk.git", from: "0.1.0")
+]
+```
+
+Then depend on the umbrella module, or pick individual provider targets to keep your binary lean:
+
+```swift
+.target(name: "MyApp", dependencies: [
+    .product(name: "AgentKit", package: "swift-agent-sdk")
+])
+```
+
+## Quick start
 
 ```swift
 // Structured output — any @Generable type
@@ -81,37 +102,73 @@ let agent = Agent<Deps, Support>(AnthropicModel(model: "claude-sonnet-4-6"))
 let r = try await agent.run("What's my balance?", deps: Deps(customerID: 1, db: db))
 ```
 
-`"provider:model"` selectors work after registering providers:
-
 ```swift
+// "provider:model" selectors
 registerBundledProviders()
 let agent = try Agent<Void, String>(ModelSelector("anthropic:claude-sonnet-4-6"))
 ```
 
+## The run is a graph
+
+Every run executes as an explicit state machine on the built-in **AgentGraph** engine (a Swift port of `pydantic_graph`):
+
+```mermaid
+flowchart LR
+    UserPromptNode --> ModelRequestNode --> CallToolsNode
+    CallToolsNode -->|tool calls| ModelRequestNode
+    CallToolsNode -->|final output| End
+```
+
+`run()` and `runStream()` drive this graph for you. When you need to observe or steer it, use `iter()` to walk the run node-by-node and stream any node before the run advances past it:
+
+```swift
+let run = try agent.iter("Where were the 2012 Olympics held?")
+for try await node in run {
+    switch node {
+    case .userPrompt:           print("prompt")
+    case .modelRequest(let s):  for try await ev in s.events() { /* deltas, partials */ }
+    case .callTools:            print("handling response")
+    case .end(let result):      print("done:", result.output)
+    }
+}
+```
+
+`AgentGraph` is a standalone, reusable target: build your own typed asynchronous state machines with `GraphNode` / `Graph` / `GraphRun`, complete with mermaid export and a persistence seam.
+
 ## Architecture
 
 ```
-AgentCore   schema bridge, ModelMessage/Part, Usage, errors, ModelProtocol/Provider/ModelProfile
-Agents      Agent<Deps,Output> (Sendable struct, value-semantics builders), RunContext, run loop
-AgentHTTP   shared SSE parser + retry/backoff
-AgentApple  FoundationModels on-device  (only target importing the session APIs)
-AgentAnthropic  Messages API (+ offline-tested wire translation)
-AgentOpenAI  Chat Completions + native structured output + strict-schema normalization
-AgentGoogle  Gemini generateContent + native structured output + OpenAPI-subset schema normalization
-AgentTestSupport  TestModel / FunctionModel / FallbackModel
-AgentKit    umbrella re-export + registerBundledProviders()
+AgentCore        schema bridge, ModelMessage (request/response split), Usage, errors, ModelProtocol/ModelProfile
+AgentGraph       generic async state-machine engine (GraphNode / Graph / GraphRun, mermaid, persistence seam)
+Agents           Agent<Deps,Output> (Sendable struct, value-semantics builders), RunContext, the graph-based run loop, iter()
+AgentHTTP        shared SSE parser + retry/backoff
+AgentApple       FoundationModels on-device (only target importing the session APIs)
+AgentAnthropic   Messages API           (+ offline-tested wire translation)
+AgentOpenAI      Chat Completions + native structured output + strict-schema normalization
+AgentGoogle      Gemini generateContent + native structured output + OpenAPI-subset normalization
+AgentTestSupport TestModel / FunctionModel / ScriptedStreamModel / FallbackModel
+AgentKit         umbrella re-export + registerBundledProviders()
 ```
 
-The run loop is a direct `async` loop (not built on a graph yet); its node
-boundaries match a future graph engine so the public API won't change when the
-graph lands in Phase 3.
+## Roadmap
+
+Completed: vertical slice, message-model realignment, provider breadth and streaming, and the graph engine with `iter()`. Upcoming work is tracked as [issues](https://github.com/f3xp/swift-agent-sdk/issues):
+
+- W3 — Toolset abstraction and an MCP client (`AgentMCP`)
+- W4 — RunContext enrichment, evaluations (`AgentEvals`), and OpenTelemetry observability
+- Deferred — Apple on-device native streaming; durable graph persistence and resume
 
 ## Build & test
 
 ```sh
 swift build
-swift test
-swift run Examples hello     # live: needs ANTHROPIC_API_KEY
+swift test                   # 75 tests, fully offline
+swift run Examples iter      # live: requires ANTHROPIC_API_KEY
+swift run Examples hello
 swift run Examples city
 swift run Examples support
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 f3xp
